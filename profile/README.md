@@ -4,6 +4,10 @@
 **EZPZ**는 `'Easy Popup Zone'`의 약자로, 사용자들에게 간편하고 직관적인 팝업 스토어 경험을 제공하는 것을 목표로 합니다. EZPZ는 최신 팝업 트렌드를 한눈에 볼 수 있는 허브 역할을 하며, 사용자가 쉽고 빠르게 예약하고 원하는 굿즈를 구매할 수 있도록 돕습니다. EZPZ를 통해 팝업 스토어의 모든 과정을 손쉽게 관리하고 즐길 수 있는 최적의 공간을 제공하여, 트렌드에 민감한 MZ 세대의 기대를 충족시키고자 합니다.
 </br></br>
 
+## ✔️ 서비스 아키텍처
+![인프라구성도 drawio](https://github.com/user-attachments/assets/8f3117ea-06b0-459b-875b-551671996083)
+</br></br>
+
 ## ✔️ ERD
 ![Copy of ezpz (최종) (1)](https://github.com/user-attachments/assets/56b9f919-304d-4c42-8641-34949d46fa30)
 
@@ -15,9 +19,6 @@ https://docs.google.com/spreadsheets/d/1_3SPLxWsbA3cSi7pJJ3N0nBEA1QJgEhzCbwG_eMM
 ## ✔️ API 명세
 https://docs.google.com/spreadsheets/d/1idzqXzU3zV-MfIImZvRcLJuWeOOjaQd8rtfax7csXdI/edit?usp=sharing
 </br></br>
-
-## ✔️ 서비스 아키텍처
-![인프라구성도 drawio](https://github.com/user-attachments/assets/8f3117ea-06b0-459b-875b-551671996083)
 
 ## ✔️ GitHub 주소
 ### Backend
@@ -208,4 +209,498 @@ Quartz는 `자바 기반의 강력한 스케줄링 라이브러리`로, 복잡�
   > 의사결정
 
   현재 프로젝트가 Spring 기반의 프로젝트이며, 통계 데이터를 만들고 자동화 작업을 할 때에 서버 간 데이터 공유가 필요하지 않기 때문에 Quartz 까지는 사용할 필요가 없다고 생각하여 **Batch Scheduler**를 통해 통계 작업을 처리하도록 결정하였습니다.
+</details>
+</br></br>
+
+## ✔️ 트러블 슈팅
+<details>
+  <summary>1. 동시성 테스트</summary>
+  
+  > 문제 발생
+
+  분산락을 적용하기 전, 남은 개수가 100개인 쿠폰을 User 100명이 동시에 다운로드하는 테스트를 진행했습니다. 아직 동시성 제어가 안 되어있기 때문에 남은 개수가 0개도 100개도 아닌 값이 되어야 했지만, 이상하게도 100개가 그대로 남아있었습니다. 즉, 쿠폰이 하나도 안 줄어들었다는 것이며, 이는 모든 요청에 대한 트랜잭션이 전부 다 롤백되어서 update 쿼리가 하나도 안 나갔다는 뜻이었습니다.
+
+```java
+@SpringBootTest
+public class CouponConcurrencyTest {
+
+    @Autowired
+    CouponService couponService;
+
+    @Autowired
+    CouponRepository couponRepository;
+
+    @MockBean
+    UserCouponRepository userCouponRepository;
+
+    User user = User.createMockUser();
+
+    Coupon coupon;
+
+    int threadCount = 100;
+
+    @BeforeEach
+    void setUp() {
+        coupon = Coupon.createMockCoupon(threadCount);
+        couponRepository.save(coupon);
+    }
+
+    @Test
+    void 쿠폰_다운로드_동시성_테스트_분산락_미적용() throws InterruptedException {
+        // given
+        given(userCouponRepository.existsByUserAndCoupon(any(User.class), any(Coupon.class)))
+                .willReturn(false);
+                
+        // when
+        ExecutorService executorService = Executors.newFixedThreadPool(threadCount);
+        CountDownLatch latch = new CountDownLatch(threadCount);
+        for (int i = 0; i < threadCount; i++) {
+            executorService.submit(() -> {
+                try {
+                    couponService.downloadCouponWithoutLock(coupon.getId(), user);
+                } finally {
+                    latch.countDown();
+                }
+            });
+        }
+        latch.await();
+
+        // then
+        int remainingCount = couponRepository.findById(coupon.getId()).orElseThrow().getRemainingCount();
+        assertThat(remainingCount).isNotZero().isNotEqualTo(threadCount);
+
+        System.out.println("\n[remainingCount]");
+        System.out.println("Expected = 0");
+        System.out.println("Actual = " + remainingCount);
+    }
+}
+```
+
+  > 발생 원인
+
+디버깅 해보니 `UserCouponResponseDto.of()`에 `null`이 들어가는 것을 확인했습니다. 이는 userCouponRepository가 MockBean인데, userCouponRepository.save의 결과를 따로 지정해주지 않았기 때문이었습니다. 따라서 UserCouponResponseDto에서 `null.getId()`를 하게 되고, 이에 따라 `NullPointerException`이 발생하여 트랜잭션이 롤백되기 때문에 원하던 결과가 나오지 않았던 것이었습니다. 
+
+```java
+@Transactional
+public UserCouponResponseDto downloadCouponWithoutLock(Long couponId, User user) {
+    Coupon coupon = couponRepository.findById(couponId)
+            .orElseThrow(() -> new CustomException(COUPON_NOT_FOUND));
+    // 이미 다운로드 받은 쿠폰인지 확인
+    if (userCouponRepository.existsByUserAndCoupon(user, coupon)) {
+        throw new CustomException(ALREADY_DOWNLOADED_COUPON);
+    }
+    coupon.download();
+    UserCoupon userCoupon = userCouponRepository.save(UserCoupon.of(user, coupon));
+    return UserCouponResponseDto.of(userCoupon);
+}
+```
+
+```java
+@Getter
+public class UserCouponResponseDto {
+
+    private final Long userCouponId;
+    private final Long userId;
+    private final Long couponId;
+
+    private UserCouponResponseDto(UserCoupon userCoupon) {
+        this.userCouponId = userCoupon.getId();
+        this.userId = userCoupon.getUser().getId();
+        this.couponId = userCoupon.getCoupon().getId();
+    }
+
+    public static UserCouponResponseDto of(UserCoupon userCoupon) {
+        return new UserCouponResponseDto(userCoupon);
+    }
+    
+}
+```
+이러한 NPE의 발생 여부를 몰랐던 이유는 스레드 병렬 수행에 쓰인 `CountDownLatch`가 다음 그림과 같이 예외를 먹기 때문이었습니다.
+
+
+  > 문제 해결
+
+  예외 발생 여부는 `CountDownLatch` 대신 `IntStream`을 사용함으로써 확인할 수 있었습니다. 둘 다 동일한 로직이지만 `CountDownLatch`는 테스트 도중 예외가 발생해도 그대로 수행하는 반면, `IntStream`은 예외가 발생하면 테스트를 중단하고 예외 정보를 출력한다는 차이점이 존재했습니다.
+
+```java
+@Test
+void 쿠폰_다운로드_동시성_테스트_분산락_미적용() {
+    // given
+    given(userCouponRepository.existsByUserAndCoupon(any(User.class), any(Coupon.class)))
+            .willReturn(false);
+
+    // when
+    IntStream.range(0, threadCount).parallel().forEach(i ->
+            couponService.downloadCouponWithoutLock(coupon.getId(), user)
+    );
+
+    // then
+    int remainingCount = couponRepository.findById(coupon.getId()).orElseThrow().getRemainingCount();
+    assertThat(remainingCount).isNotZero().isNotEqualTo(threadCount);
+
+    System.out.println("\n[remainingCount]");
+    System.out.println("Expected = 0");
+    System.out.println("Actual = " + remainingCount);
+}
+```
+
+그리고 `UserCouponResponseDto.of()`에 `null`이 들어가지 않도록 다음과 같이 객체를 생성하는 로직과 repository에 save하는 로직을 분리해서 문제를 해결했습니다.
+
+```java
+@Transactional
+public UserCouponResponseDto downloadCouponWithoutLock(Long couponId, User user) {
+    Coupon coupon = couponRepository.findById(couponId)
+            .orElseThrow(() -> new CustomException(COUPON_NOT_FOUND));
+    // 이미 다운로드 받은 쿠폰인지 확인
+    if (userCouponRepository.existsByUserAndCoupon(user, coupon)) {
+        throw new CustomException(ALREADY_DOWNLOADED_COUPON);
+    }
+    coupon.download();
+    
+    UserCoupon userCoupon = UserCoupon.of(user, coupon);
+    userCouponRepository.save(userCoupon);
+    
+    return UserCouponResponseDto.of(userCoupon);
+}
+```
+</details>
+<details>
+  <summary>2. 분산락</summary>
+  
+  > 문제 발생
+
+분산락을 적용한 후, 남은 개수가 100개인 쿠폰을 User 100명이 동시에 다운로드하는 테스트를 진행했습니다. 동시성 제어를 했기 때문에 남은 개수가 0개가 되어야 했지만, 이상하게도 조금씩 남아있었습니다. 즉, 분산락을 적용했지만 여전히 동시성 제어가 되지 않았습니다.
+
+```java
+@Transactional
+public UserCouponResponseDto downloadCoupon(Long couponId, User user) {
+    RLock lock = redissonClient.getFairLock("couponDownloadLock_" + couponId); // 요청 들어온 순서대로 처리
+    boolean locked = false;
+    try {
+        locked = lock.tryLock(10, 60, TimeUnit.SECONDS);
+        if (locked) {
+				    Coupon coupon = couponRepository.findById(couponId)
+				            .orElseThrow(() -> new CustomException(COUPON_NOT_FOUND));
+				    // 이미 다운로드 받은 쿠폰인지 확인
+				    if (userCouponRepository.existsByUserAndCoupon(user, coupon)) {
+				        throw new CustomException(ALREADY_DOWNLOADED_COUPON);
+				    }
+				    coupon.download();
+				    
+				    UserCoupon userCoupon = UserCoupon.of(user, coupon);
+				    userCouponRepository.save(userCoupon);
+				    
+				    return UserCouponResponseDto.of(userCoupon);
+        }
+    } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+    } finally {
+        if (locked && lock.isHeldByCurrentThread()) {
+            lock.unlock(); // 락을 획득했을 때만 해제
+        }
+    }
+    return null;
+}@Transactional
+public UserCouponResponseDto downloadCoupon(Long couponId, User user) {
+    RLock lock = redissonClient.getFairLock("couponDownloadLock_" + couponId); // 요청 들어온 순서대로 처리
+    boolean locked = false;
+    try {
+        locked = lock.tryLock(10, 60, TimeUnit.SECONDS);
+        if (locked) {
+				    Coupon coupon = couponRepository.findById(couponId)
+				            .orElseThrow(() -> new CustomException(COUPON_NOT_FOUND));
+				    // 이미 다운로드 받은 쿠폰인지 확인
+				    if (userCouponRepository.existsByUserAndCoupon(user, coupon)) {
+				        throw new CustomException(ALREADY_DOWNLOADED_COUPON);
+				    }
+				    coupon.download();
+				    
+				    UserCoupon userCoupon = UserCoupon.of(user, coupon);
+				    userCouponRepository.save(userCoupon);
+				    
+				    return UserCouponResponseDto.of(userCoupon);
+        }
+    } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+    } finally {
+        if (locked && lock.isHeldByCurrentThread()) {
+            lock.unlock(); // 락을 획득했을 때만 해제
+        }
+    }
+    return null;
+}
+```
+
+> 문제 원인
+
+분산락을 적용한 코드를 보면 메서드에 `@Transactional` 애노테이션이 걸려있습니다. 해당 메서드가 호출되면 트랜잭션이 시작되고, 메서드 실행이 완료되면 트랜잭션이 커밋됩니다. 하지만 내부 코드를 보면 finally 문 안의 `lock.unlock()`을 실행하고 나서 메서드가 종료됩니다. 즉, 락을 해제하고 나서 트랜잭션이 커밋된다는 뜻입니다. 따라서 락이 해제되고 트랜잭션이 커밋되기 전, 이 짧은 찰나에 다른 스레드가 락을 획득한 것이었습니다.
+
+> 문제 해결
+해당 문제를 해결하려면 락을 해제하기 전에 트랜잭션을 커밋해야 했습니다. 이를 구현하기 위해 애노테이션 기반의 Spring AOP를 이용한 분산락을 적용했습니다.
+```java
+@Slf4j
+@Aspect
+@Component
+@RequiredArgsConstructor
+public class DistributedLockAspect {
+
+    private static final String REDISSON_LOCK_PREFIX = "LOCK:";
+
+    private final RedissonClient redissonClient;
+    private final TransactionForAop transactionForAop;
+
+    @Around("@annotation(com.sparta.ezpzuser.common.lock.DistributedLock)")
+    public Object lock(final ProceedingJoinPoint joinPoint) throws Throwable {
+        MethodSignature signature = (MethodSignature) joinPoint.getSignature();
+        Method method = signature.getMethod();
+        DistributedLock distributedLock = method.getAnnotation(DistributedLock.class);
+
+        String key = REDISSON_LOCK_PREFIX +
+                CustomSpELParser.getDynamicValue(
+                        signature.getParameterNames(),
+                        joinPoint.getArgs(),
+                        distributedLock.key()
+                );
+
+        RLock rLock = redissonClient.getFairLock(key); // 선착순 보장
+
+        try {
+            log.info("try lock for key: {}", key);
+            boolean available = rLock.tryLock(
+                    distributedLock.waitTime(),
+                    distributedLock.leaseTime(),
+                    distributedLock.timeUnit()
+            );
+            if (!available) {
+                throw new RuntimeException("lock failed for key: " + key);
+            }
+            // DistributedLock 어노테이션이 선언된 메서드를 별도의 트랜잭션으로 실행
+            return transactionForAop.proceed(joinPoint);
+        } catch (InterruptedException e) {
+            throw new InterruptedException();
+        } finally {
+            // 반드시 트랜잭션 커밋 이후 락이 해제되도록 처리
+            try {
+                rLock.unlock();
+            } catch (IllegalMonitorStateException e) {
+                log.error("Redisson Lock is Already UnLocked");
+            }
+        }
+    }
+```
+```java
+@Component
+public class TransactionForAop {
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public Object proceed(final ProceedingJoinPoint joinPoint) throws Throwable {
+        return joinPoint.proceed();
+    }
+
+}
+```
+`@DistributedLock` 애노테이션이 선언된 메서드를 별도의 트랜잭션으로 실행함으로써 락을 해제하기 전에 트랜잭션 커밋을 하도록 구현했습니다. 하지만 다음과 같이 락을 얻는데 실패했습니다.
+
+
+이는 CouponService 단에 `@Transactional(readonly = true)` 애노테이션을 걸어두었기 때문이었습니다. 분산락을 위한  `DistributedLockAspect`보다 트랜잭션 인터셉터가 먼저 등록되었기 때문에 상위에서 이미 트랜잭션이 시작되어 connection 문제가 발생한 것이었습니다. 따라서 트랜잭션 Propagation을 `REQUIRES_NEW`로 바꿔도 해결이 불가능했습니다. 해당 문제는 상위 `@Transactional`을 제거하거나 `DistributedLockAspect`에 `@Order(1) `애노테이션을 걸어서 빈 등록 순서를 트랜잭션 인터셉터보다 먼저 등록되게 수정함으로써 해결할 수 있었습니다.
+</details>
+<details>
+  <summary>3. Redis Cache 처리</summary>
+  
+  > 문제 발생
+
+Redis를 사용하여 캐시 처리를 하던 중, `Page`를 캐시할 때 **직렬화, 역직렬화**가 안 되는 오류가 발생
+
+> 발생 원인
+
+Redis를 활용한 캐시 처리를 할 때는, 캐시처리를 적용할 메소드의 반환 class에 **기본 생성자**가 있어야 하는데, **Page 클래스는 기본 생성자가 없기 때문에** 발생한 문제
+
+> 해결 방법
+`PageImpl<T>`을 상속 받은 `RestPage<T>` 라는 Wrapper class를 적용
+
+```java
+@JsonIgnoreProperties(ignoreUnknown = true, value = {"pageable"})
+public class RestPage<T> extends PageImpl<T> {
+	
+	@JsonCreator(mode = JsonCreator.Mode.PROPERTIES)
+	public RestPage(@JsonProperty("content") java.util.List<T> content,
+					@JsonProperty("number") int page,
+					@JsonProperty("size") int size,
+					@JsonProperty("totalElements") long totalElements) {
+		
+		super(content, PageRequest.of(page, size), totalElements);
+	}
+	
+	public RestPage(Page<T> page) {
+		super(page.getContent(), page.getPageable(), page.getTotalElements());
+	}
+	
+	public RestPage(List<T> content, Pageable pageable, Long total) {
+		super(content, pageable, total);
+	}
+}
+```
+</br>
+
+**기존 코드**
+```java
+public Page<ReservationResponseDto> findReservations(Pageable pageable, String status, User user) {
+		ReservationStatus reservationStatus = ReservationStatus.valueOf(status.toUpperCase());
+		Page<Reservation> reservationPage = reservationRepository.findByUserIdAndStatus(user.getId(), reservationStatus, pageable);
+		validatePageableWithPage(pageable, reservationPage);
+		
+		return reservationPage.map(r -> ReservationResponseDto.of(r, r.getSlot()));
+	}
+```
+</br>
+
+
+**변경된 코드**
+```java
+	@Cacheable(value = "reservations", key = "#user.id + ':' + #status + ':' + #pageable.pageNumber")
+	public RestPage<ReservationResponseDto> findReservations(Pageable pageable, String status, User user) {
+		ReservationStatus reservationStatus = ReservationStatus.valueOf(status.toUpperCase());
+		Page<Reservation> reservationPage = reservationRepository.findByUserIdAndStatus(user.getId(), reservationStatus, pageable);
+		validatePageableWithPage(pageable, reservationPage);
+		
+		return new RestPage<>(reservationPage.map(r -> ReservationResponseDto.of(r, r.getSlot())));
+	}
+```
+</details>
+<details>
+  <summary>4. DB Connection</summary>
+  
+> 문제 발생
+
+RDS의 db.t3.micro 클래스를 이용하여 MySQL을 사용하던 중, 배포 과정에서 DB Connection이 50개를 초과하여 DB와 연결이 안 되는 문제 발생
+
+> 발생 원인
+
+DB의 Connection 관리를 제대로 해주지 않아서 발생한 문제
+
+- 접속 가능한 max_connection 수 50으로 적었던 점
+- timeout 을 설정하지 않아, 요청이 없는 connection을 계속 유지시켰던 점
+
+> 문제 해결
+
+- AWS에서 파라미터 그룹을 설정하여, 현재 사용하고 있는 MySQL RDS에 적용
+    - connect_timeout : 180초
+    - max_connections : 100개
+
+- 데이터베이스에 3분 이상 요청이 없으면 `Connection을 해제`하는 방식을 사용
+- 최대 연결할 수 있는 Connection을 `100개`로 증가
+</details>
+<details>
+  <summary>5. ALB 리스너 규칙</summary>
+
+> 문제 발생 
+
+3개의 서버에 대한 요청을 한 개의 로드밸런서를 사용해서 처리하는 중, 
+HTTP 요청에 따라 리스너 규칙을 적용하여서 User, Host, Admin 서비스에 맞는 서버로 요청을 라우팅 시키기로 하였다. </br>
+
+프론트 쪽에서 HTTP의 `Host 헤더`를  `OOO.ezpzz.store` 의 형식으로 적용하여 요청을 라우팅하려고 시도하려고 하였으나 계속해서 실패하게 되었다.
+
+> 발생 원인
+
+- 브라우저가 Host 헤더를 클라이언트 코드에서 설정하려고 하는 시도를 차단하면서 발생하는 문제
+- 보안상의 이유로 특정 **“unsafe” 헤더**(Host, Content-Length 등)를 클라이언트 측에서 직접 설정하거나 수정하는 것을 허용하지 않는 문제
+
+> 문제 해결
+
+방법을 찾던 중 각 사이트에서 `Referer 헤더` 값을 통해 라우팅을 시키는 방식을 고민하게 되었고,
+
+로드밸런서에서 리스너 규칙을 `Referer 헤더` 값으로 변경하였고, 이를 통해 클라이언트 쪽에서 적절한 서버로 요청을 라우팅할 수 있게됨
+</details>
+<details>
+    <summary>6. Docker 이미지 빌드</summary>
+
+### 문제 1
+
+> 문제 발생
+
+Docker 이미지 빌드는 성공하지만, 실행이 안 되는 문제 발생
+
+> **발생 원인**
+> 
+
+루트 폴더가 아닌, Docker 폴더 안에 DockerFile을 생성했기 때문에,
+Docker 이미지 빌드 시, 도커 파일의 경로를 지정해주지 않아서 .jar 파일의 경로를 찾지 못해 실행이 되지 못한 것이었다
+
+> 문제 해결
+
+```
+docker build . --file docker/Dockerfile --tag image-name:latest
+```
+
+이미지 빌드 DockerFile의 경로를 지정해두니 해결되었다
+
+### 문제 2
+
+> 문제 발생
+
+```
+WARNING: The requested image's platform (linux/arm64/v8) does not match the detected host platform (linux/amd64/v3) and no specific platform was requested
+
+exec /usr/local/openjdk-17/bin/java: exec format error
+```
+
+로컬에서 도커 이미지 빌드는 잘되었지만 AWS EC2 인스턴스에서 docker run 명령어로 컨테이너를 실행할때 위와 같은 에러 발생했다
+
+> 발생 원인
+
+도커 이미지 빌드 시, 현재 빌드 플랫폼인 로컬 환경의 맥북 Apple M1과 EC2 서버의 호환성이 문제로 인한 것이었다.
+
+> 문제 해결
+
+```
+docker build . --platform linux/amd64 -f docker/Dockerfile -t image-name:latest
+```
+
+로컬에서 빌드한 이미지가 **`linux/arm64/v8`** 이었고, 이를 **`linux/amd64`** 플랫폼 형태의 이미지로 새롭게 빌드하기 위해 위와 같은 명령어를 사용해 EC2 서버와 호환성을 맞춰주니 문제가 해결되었다.
+</details>
+<details>
+  <summary>7. GitHub Actions gradle 빌드</summary>
+
+> 문제 발생
+
+GitHub Action runner에서 CD 자동화 파이프라인을 구축하던 중, .`/gradlew build` 명령어에서 에러가 발생했다
+
+- Task :compileJava 단계에서 `Q클래스` 및 `lombok 애노테이션`을 사용한 메서드들을 못 읽는 에러가 발생했다
+- Q클래스, lombok 을 못 읽는 걸로 보아 `annotationProcessor`의 문제라고 생각되어 관련 에러들을 모두 찾아보았지만 해결하지 못했다
+- 그 이후로도 `gradle 설정`을 변경해보았지만 해결하지 못 했다
+- 결국 프로젝트 및 gradle의 문제는 아니고 **`GitHub Action 환경의 문제`**라고 판단했다
+
+> 발생 원인
+
+문제의 발생 원인은 **GitHub Action, gralde의 캐시** 때문이었다
+
+> 문제 해결
+
+```
+# 원본
+- name: Build with Gradle Wrapper
+  run: ./gradlew build
+
+# 1. Github Cache 지우기
+- name: Cache dependencies
+  uses: actions/cache@v2
+  with: 
+    path: ~/.gradle/caches
+    key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}-v2
+  
+# 2. gradle 관련 캐시 전부 지우기  
+- name: Build with Gradle Wrapper
+  run: ./gradlew clean build --no-build-cache
+- name: Clear Gradle Cache
+  run: rm -rf ~/.gradle/caches/
+
+# 캐시 지운 이후
+- name: Build with Gradle
+  run: ./gradlew clean build --stacktrace
+```
+
+- 첫번째 시도로 GitHub Action의 캐시를 삭제
+- 두번째 시도로 gradle의 모든 캐시를 삭제
+
+캐시를 삭제한 이후에는 gradle build가 원만하게 수행되었다
 </details>
