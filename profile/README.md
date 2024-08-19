@@ -31,6 +31,8 @@ https://docs.google.com/spreadsheets/d/1idzqXzU3zV-MfIImZvRcLJuWeOOjaQd8rtfax7cs
 - Host : https://github.com/NBCAMP-EZPZ/EZPZ-Host-Front
 - Admin : https://github.com/NBCAMP-EZPZ/EZPZ-Admin-Front
 
+## ✔️ 시연 영상
+
 </br></br>
 
 ## ✔️ 주요 기술
@@ -81,7 +83,7 @@ https://docs.google.com/spreadsheets/d/1idzqXzU3zV-MfIImZvRcLJuWeOOjaQd8rtfax7cs
 - 신규 팝업 심사
 - 쿠폰 발행
 
-</br></br>
+</br>
 
 ## ✔️ 기술적 의사 선택
 <details>
@@ -210,7 +212,7 @@ Quartz는 `자바 기반의 강력한 스케줄링 라이브러리`로, 복잡�
 
   현재 프로젝트가 Spring 기반의 프로젝트이며, 통계 데이터를 만들고 자동화 작업을 할 때에 서버 간 데이터 공유가 필요하지 않기 때문에 Quartz 까지는 사용할 필요가 없다고 생각하여 **Batch Scheduler**를 통해 통계 작업을 처리하도록 결정하였습니다.
 </details>
-</br></br>
+</br>
 
 ## ✔️ 트러블 슈팅
 <details>
@@ -704,3 +706,11 @@ GitHub Action runner에서 CD 자동화 파이프라인을 구축하던 중, .`/
 
 캐시를 삭제한 이후에는 gradle build가 원만하게 수행되었다
 </details>
+</br>
+
+## ✨ Team EZPZ
+|여운호|이희수|이민정|유동현|
+|:-:|:-:|:-:|:-:|
+|<img src="https://avatars.githubusercontent.com/u/122009132?v=4" height=200 width=200> | <img src="https://avatars.githubusercontent.com/u/114149212?v=4" height=200 width=200> | <img src="https://avatars.githubusercontent.com/u/60657536?v=4" height=200 width=200> | <img src="https://avatars.githubusercontent.com/u/64765991?v=4" height=200 width=200>|
+|[@uh1205](https://github.com/uh1205)|[@llocr](https://github.com/llocr)|[@M1ngD0ng](https://github.com/M1ngD0ng)|[@ydh5017](https://github.com/ydh5017)|
+</br></br>
