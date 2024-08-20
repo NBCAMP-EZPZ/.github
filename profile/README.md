@@ -32,7 +32,7 @@ https://docs.google.com/spreadsheets/d/1idzqXzU3zV-MfIImZvRcLJuWeOOjaQd8rtfax7cs
 - Admin : https://github.com/NBCAMP-EZPZ/EZPZ-Admin-Front
 
 ## ✔️ 시연 영상
-
+https://youtu.be/tc06RjScPmA
 </br></br>
 
 ## ✔️ 주요 기술
